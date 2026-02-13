@@ -51,7 +51,6 @@ CORS(
 print("✅ CORS enabled")
 
 # ================= DATABASE CONFIG =================
-# ================= DATABASE CONFIG =================
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 if not DATABASE_URL:
@@ -132,16 +131,25 @@ app.register_blueprint(profile_bp, url_prefix="/api/profile")
 
 print("✅ All blueprints registered")
 
-# ================= START SERVER =================
+# ================= PRODUCTION READY =================
+# Gunicorn will serve this app in production
+# No app.run() needed - Render uses: gunicorn run:app
+#
+# For local development, use:
+# python run.py (will use Gunicorn if installed)
+# OR: flask run --host=0.0.0.0 --port=5000
+
 if __name__ == "__main__":
+    # Create static directory if it doesn't exist
     os.makedirs(os.path.join(BASE_DIR, "static"), exist_ok=True)
-
-    print("\n🚀 Server running at http://127.0.0.1:5000")
-    print("📍 Routes list: http://127.0.0.1:5000/routes\n")
-
-    app.run(
-        host="0.0.0.0",
-        port=5000,
-        debug=True,
-        use_reloader=False
-    )
+    
+    # Try to use gunicorn for local development too
+    try:
+        import gunicorn
+        print("\n🚀 For local development, run:")
+        print("   gunicorn run:app --bind 0.0.0.0:5000 --reload")
+        print("   OR: flask run --host=0.0.0.0 --port=5000\n")
+    except ImportError:
+        print("\n⚠️  Install gunicorn for production-like local testing:")
+        print("   pip install gunicorn")
+        print("\n🚀 For now, use: flask run --host=0.0.0.0 --port=5000\n")
