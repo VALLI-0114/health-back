@@ -40,3 +40,4 @@ numpy
 openpyxl
 joblib
 scikit-learn
+gunicorn
