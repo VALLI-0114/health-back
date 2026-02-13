@@ -5,6 +5,9 @@ PCOD Routes - ML-BASED VERSION (Like Anemia)
 ✅ Calibrated Probabilities
 ✅ Professional Implementation
 ✅ FIXED: Ensures all 3 classes in training data
+✅ IMPROVED: Better synthetic data generation
+✅ IMPROVED: Threshold-based risk mapping
+✅ IMPROVED: Medical safety overrides
 """
 
 from flask import Blueprint, request, jsonify, send_file
@@ -56,57 +59,68 @@ def train_or_load_pcod_model():
 
     print("⚡ Training PCOD ML model...")
 
+    # ======================================================
+    # IMPROVED SYNTHETIC TRAINING DATA (MEDICALLY REALISTIC)
+    # ======================================================
+
     np.random.seed(42)
     data = []
 
-    # ✅ FIXED: Generate synthetic training data with GUARANTEED 3 classes
-    # Strategy: Force minimum representation of each class
-    
-    # Generate 1000 examples of each class explicitly
-    for target_class in [0, 1, 2]:
-        for _ in range(1000):
-            age = np.random.randint(15, 45)
-            
-            if target_class == 0:  # Low Risk
-                bmi = np.random.uniform(18, 24)
-                cycle_length = np.random.randint(21, 32)
-                bleeding_days = np.random.randint(3, 7)
-                irregular_periods = np.random.randint(0, 40)
-                excessive_hair = np.random.randint(0, 40)
-                acne = np.random.randint(0, 40)
-                weight_gain = np.random.randint(0, 40)
-                mood_swings = np.random.randint(0, 50)
-                
-            elif target_class == 1:  # Moderate Risk
-                bmi = np.random.uniform(25, 29)
-                cycle_length = np.random.randint(32, 40)
-                bleeding_days = np.random.randint(4, 8)
-                irregular_periods = np.random.randint(40, 70)
-                excessive_hair = np.random.randint(40, 70)
-                acne = np.random.randint(40, 70)
-                weight_gain = np.random.randint(40, 70)
-                mood_swings = np.random.randint(40, 70)
-                
-            else:  # High Risk (target_class == 2)
-                bmi = np.random.uniform(30, 40)
-                cycle_length = np.random.randint(40, 60)
-                bleeding_days = np.random.randint(5, 10)
-                irregular_periods = np.random.randint(60, 101)
-                excessive_hair = np.random.randint(60, 101)
-                acne = np.random.randint(60, 101)
-                weight_gain = np.random.randint(60, 101)
-                mood_swings = np.random.randint(60, 101)
-            
-            # Add some controlled noise
-            if np.random.rand() < 0.05:
-                target_class = np.random.choice([0, 1, 2])
+    for _ in range(4000):
 
-            data.append([
-                age, bmi, cycle_length, bleeding_days,
-                irregular_periods, excessive_hair,
-                acne, weight_gain, mood_swings,
-                target_class
-            ])
+        age = np.random.randint(15, 45)
+        bmi = np.random.uniform(16, 40)
+        cycle_length = np.random.randint(21, 60)
+        bleeding_days = np.random.randint(2, 10)
+
+        irregular_periods = np.random.randint(0, 101)
+        excessive_hair = np.random.randint(0, 101)
+        acne = np.random.randint(0, 101)
+        weight_gain = np.random.randint(0, 101)
+        mood_swings = np.random.randint(0, 101)
+
+        # --------------------------------------------------
+        # IMPROVED RISK LOGIC
+        # --------------------------------------------------
+
+        risk_score = 0
+
+        # Cycle-based dominance
+        if cycle_length > 40:
+            risk_score += 2
+        elif cycle_length > 35:
+            risk_score += 1
+
+        # BMI factor (both obese and lean PCOS)
+        if bmi > 30:
+            risk_score += 2
+        elif bmi > 25:
+            risk_score += 1
+        elif bmi < 18.5 and cycle_length > 35:
+            risk_score += 2  # Lean PCOS
+
+        # Hormonal symptoms
+        if acne > 70:
+            risk_score += 1
+        if excessive_hair > 70:
+            risk_score += 1
+        if weight_gain > 70:
+            risk_score += 1
+
+        # Final label
+        if risk_score >= 4:
+            label = 2  # High
+        elif risk_score >= 2:
+            label = 1  # Moderate
+        else:
+            label = 0  # Low
+
+        data.append([
+            age, bmi, cycle_length, bleeding_days,
+            irregular_periods, excessive_hair,
+            acne, weight_gain, mood_swings,
+            label
+        ])
 
     df = pd.DataFrame(data, columns=[
         "age", "bmi", "cycle_length", "bleeding_days",
@@ -144,6 +158,7 @@ def train_or_load_pcod_model():
     pcod_model.fit(X_train, y_train)
     
     print(f"📊 Trained model classes: {pcod_model.classes_}")
+    print(f"📈 Feature importance: {pcod_model.feature_importances_}")
     
     # ✅ CRITICAL VALIDATION: Ensure model learned all 3 classes
     if not np.array_equal(pcod_model.classes_, np.array([0, 1, 2])):
@@ -329,7 +344,7 @@ def get_pcod_risk_factors(age, bmi, cycle_length, bleeding_days, symptoms,
     return factors
 
 
-def apply_probability_calibration(probabilities, temperature=1.8):
+def apply_probability_calibration(probabilities, temperature=1.3):
     """
     Apply temperature scaling to soften overconfident probabilities
     
@@ -339,7 +354,7 @@ def apply_probability_calibration(probabilities, temperature=1.8):
     
     Args:
         probabilities: Raw model probabilities [P(Low), P(Moderate), P(High)]
-        temperature: Calibration parameter (default 1.8 for medical uncertainty)
+        temperature: Calibration parameter (default 1.3 for medical uncertainty)
     
     Returns:
         Calibrated probabilities that sum to 1.0
@@ -374,6 +389,8 @@ def check_pcod(current_user):
     ✅ FIXED: Calibrated probabilities (realistic confidence levels)
     ✅ FIXED: Risk factors included in response
     ✅ FIXED: Ensures model has all 3 classes
+    ✅ IMPROVED: Threshold-based risk mapping
+    ✅ IMPROVED: Medical safety overrides
     
     Expected JSON payload:
     {
@@ -476,22 +493,40 @@ def check_pcod(current_user):
             raw_probabilities = pcod_model.predict_proba(feature_vector)[0]
             print(f"📈 New Raw Probabilities: {raw_probabilities}")
 
-        # Apply probability calibration
-        calibrated_probabilities = apply_probability_calibration(raw_probabilities, temperature=1.8)
+        # Apply probability calibration (IMPROVED: temperature 1.3)
+        calibrated_probabilities = apply_probability_calibration(raw_probabilities, temperature=1.3)
         
         print(f"🎯 Calibrated Probabilities (Low/Moderate/High): {calibrated_probabilities}")
 
-        # Use highest probability class for consistent risk level and score
-        max_index = np.argmax(calibrated_probabilities)
-        
-        risk_mapping = {
-            0: "Low",
-            1: "Moderate",
-            2: "High"
-        }
-        
-        risk_level = risk_mapping[max_index]
-        risk_score = round(float(calibrated_probabilities[max_index] * 100), 2)
+        # ========== IMPROVED THRESHOLD-BASED RISK MAPPING ==========
+        high_prob = calibrated_probabilities[2]
+        moderate_prob = calibrated_probabilities[1]
+        low_prob = calibrated_probabilities[0]
+
+        if high_prob >= 0.55:
+            risk_level = "High"
+            risk_score = round(high_prob * 100, 2)
+
+        elif moderate_prob >= 0.45:
+            risk_level = "Moderate"
+            risk_score = round(moderate_prob * 100, 2)
+
+        else:
+            risk_level = "Low"
+            risk_score = round(low_prob * 100, 2)
+
+        # ======================================================
+        # MEDICAL SAFETY OVERRIDE (CRITICAL FOR PRODUCTION)
+        # ======================================================
+
+        if cycle_length > 35 and (
+            symptoms.get("acne", 0) > 75 or
+            symptoms.get("excessive_hair", 0) > 75 or
+            symptoms.get("pelvic_pain", 0) > 75
+        ):
+            risk_level = "High"
+            risk_score = max(risk_score, 70)
+            print("⚠️ MEDICAL SAFETY OVERRIDE: Risk elevated to High")
         
         # Get PCOD status
         pcod_status = get_pcod_status(cycle_length, bmi)
@@ -550,7 +585,7 @@ def check_pcod(current_user):
                 "moderate": round(float(calibrated_probabilities[1] * 100), 2),
                 "high": round(float(calibrated_probabilities[2] * 100), 2)
             },
-            "prediction_method": "XGBoost ML Model (Calibrated, 3-Class)",
+            "prediction_method": "XGBoost ML Model (Calibrated, Threshold-Based, Medical Override)",
             "recommendations": get_pcod_recommendations(risk_level),
             "medical_note": "ML-based screening using calibrated XGBoost. Not a medical diagnosis.",
             "timestamp": new_check.created_at.isoformat() + "Z"
@@ -786,14 +821,24 @@ def check_pcod_csv():
         prediction = pcod_model.predict(feature_vector)[0]
         raw_probabilities = pcod_model.predict_proba(feature_vector)[0]
         
-        # Apply calibration
-        calibrated_probabilities = apply_probability_calibration(raw_probabilities, temperature=1.8)
+        # Apply calibration (IMPROVED: temperature 1.3)
+        calibrated_probabilities = apply_probability_calibration(raw_probabilities, temperature=1.3)
         
-        # Use highest probability class
-        max_index = np.argmax(calibrated_probabilities)
-        risk_mapping = {0: "Low", 1: "Moderate", 2: "High"}
-        risk_level = risk_mapping[max_index]
-        risk_score = round(float(calibrated_probabilities[max_index] * 100), 2)
+        # Use threshold-based mapping
+        high_prob = calibrated_probabilities[2]
+        moderate_prob = calibrated_probabilities[1]
+        low_prob = calibrated_probabilities[0]
+
+        if high_prob >= 0.55:
+            risk_level = "High"
+            risk_score = round(high_prob * 100, 2)
+        elif moderate_prob >= 0.45:
+            risk_level = "Moderate"
+            risk_score = round(moderate_prob * 100, 2)
+        else:
+            risk_level = "Low"
+            risk_score = round(low_prob * 100, 2)
+        
         status = get_pcod_status(cycle_length, bmi)
         
         risk_scores.append(risk_score)
