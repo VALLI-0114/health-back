@@ -457,17 +457,40 @@ def check_pcod(current_user):
         excessive_hair_growth = data.get("excessive_hair_growth", False)
         acne = data.get("acne", False)
 
+        # ========== NORMALIZE SYMPTOM INPUTS ==========
+        # Critical: Ensure symptoms are on 0-100 scale for ML consistency
+        def normalize_symptom(value):
+            """Normalize symptom input to 0-100 scale"""
+            if isinstance(value, bool):
+                return 100 if value else 0
+            if isinstance(value, (int, float)):
+                # If value is 0-1 (probability), scale to 0-100
+                if 0 <= value <= 1:
+                    return int(value * 100)
+                # If already 0-100, use as-is
+                if 0 <= value <= 100:
+                    return int(value)
+            return 0  # Default to 0 if invalid
+        
+        normalized_symptoms = {
+            "irregular_periods": normalize_symptom(symptoms.get("irregular_periods", 0)),
+            "excessive_hair": normalize_symptom(symptoms.get("excessive_hair", 0)),
+            "acne": normalize_symptom(symptoms.get("acne", 0)),
+            "weight_gain": normalize_symptom(symptoms.get("weight_gain", 0)),
+            "mood_swings": normalize_symptom(symptoms.get("mood_swings", 0))
+        }
+
         # Build feature vector for ML model
         feature_vector = np.array([[
             age,
             bmi,
             cycle_length,
             bleeding_days,
-            int(symptoms.get("irregular_periods", 0)),
-            int(symptoms.get("excessive_hair", 0)),
-            int(symptoms.get("acne", 0)),
-            int(symptoms.get("weight_gain", 0)),
-            int(symptoms.get("mood_swings", 0))
+            normalized_symptoms["irregular_periods"],
+            normalized_symptoms["excessive_hair"],
+            normalized_symptoms["acne"],
+            normalized_symptoms["weight_gain"],
+            normalized_symptoms["mood_swings"]
         ]])
 
         print(f"📊 Feature vector: {feature_vector}")
@@ -528,8 +551,14 @@ def check_pcod(current_user):
             risk_score = max(risk_score, 70)
             print("⚠️ MEDICAL SAFETY OVERRIDE: Risk elevated to High")
         
-        # Get PCOD status
-        pcod_status = get_pcod_status(cycle_length, bmi)
+        # Additional safety for lean PCOS
+        if bmi < 18.5 and cycle_length > 35 and risk_level == "Low":
+            risk_level = "Moderate"
+            risk_score = max(risk_score, 50)
+            print("⚠️ LEAN PCOS DETECTION: Risk elevated to Moderate")
+        
+        # Get PCOD status aligned with ML risk level
+        pcod_status = f"{risk_level} Risk - ML Based Screening"
 
         # ========== CALCULATE RISK FACTORS ==========
         risk_factors = get_pcod_risk_factors(
@@ -719,7 +748,7 @@ def get_user_stats(current_user):
                 "average_cycle_length": round(avg_cycle, 1),
                 "trend": trend,
                 "latest_result": checks[0].result,
-                "latest_risk_level": checks[0].result,
+                "latest_risk_score": checks[0].risk_score,
                 "first_check_date": checks[-1].created_at.isoformat() + "Z",
                 "last_check_date": checks[0].created_at.isoformat() + "Z"
             }
@@ -773,12 +802,16 @@ def delete_check(current_user, check_id):
 # ======================================================
 # 🔹 CSV BULK CHECK (ML-POWERED)
 # Endpoint: POST /api/pcod/check_csv
+# ✅ NOW REQUIRES AUTHENTICATION
 # ======================================================
 @pcod_bp.route("/check_csv", methods=["POST"])
-def check_pcod_csv():
+@token_required
+def check_pcod_csv(current_user):
     """
     Bulk PCOD check from CSV file using ML model
     Optionally save results to database if user_id is provided
+    
+    ✅ REQUIRES AUTHENTICATION - Production security
     """
     if "file" not in request.files:
         return jsonify({"error": "CSV file missing"}), 400
@@ -805,16 +838,29 @@ def check_pcod_csv():
         cycle_length = int(row.get("cycle_length", 28))
         bleeding_days = int(row.get("bleeding_days", 5))
         
+        # Normalize symptoms to 0-100 scale (same as single check)
+        def normalize_csv_symptom(value):
+            if pd.isna(value):
+                return 0
+            if isinstance(value, bool):
+                return 100 if value else 0
+            value = float(value)
+            if 0 <= value <= 1:
+                return int(value * 100)
+            if 0 <= value <= 100:
+                return int(value)
+            return 0
+        
         feature_vector = np.array([[
             age,
             bmi,
             cycle_length,
             bleeding_days,
-            int(row.get("irregular_periods", 0)),
-            int(row.get("excessive_hair", 0)),
-            int(row.get("acne", 0)),
-            int(row.get("weight_gain", 0)),
-            int(row.get("mood_swings", 0))
+            normalize_csv_symptom(row.get("irregular_periods", 0)),
+            normalize_csv_symptom(row.get("excessive_hair", 0)),
+            normalize_csv_symptom(row.get("acne", 0)),
+            normalize_csv_symptom(row.get("weight_gain", 0)),
+            normalize_csv_symptom(row.get("mood_swings", 0))
         ]])
 
         # ML prediction
@@ -849,11 +895,11 @@ def check_pcod_csv():
         if save_to_db and pd.notna(row.get("user_id")):
             try:
                 symptoms = {
-                    "irregular_periods": int(row.get("irregular_periods", 0)),
-                    "excessive_hair": int(row.get("excessive_hair", 0)),
-                    "acne": int(row.get("acne", 0)),
-                    "weight_gain": int(row.get("weight_gain", 0)),
-                    "mood_swings": int(row.get("mood_swings", 0)),
+                    "irregular_periods": normalize_csv_symptom(row.get("irregular_periods", 0)),
+                    "excessive_hair": normalize_csv_symptom(row.get("excessive_hair", 0)),
+                    "acne": normalize_csv_symptom(row.get("acne", 0)),
+                    "weight_gain": normalize_csv_symptom(row.get("weight_gain", 0)),
+                    "mood_swings": normalize_csv_symptom(row.get("mood_swings", 0)),
                 }
                 
                 new_check = PCODCheck(
@@ -906,18 +952,24 @@ def get_all_checks():
     """Get all PCOD checks with optional filtering"""
     try:
         # Optional filters
-        risk_level = request.args.get("risk_level")
-        result = request.args.get("result")
+        risk_score_min = request.args.get("risk_score_min", type=int)
+        risk_score_max = request.args.get("risk_score_max", type=int)
+        result_filter = request.args.get("result")
         limit = request.args.get("limit", 100, type=int)
         offset = request.args.get("offset", 0, type=int)
         
         query = PCODCheck.query
         
-        if risk_level:
-            query = query.filter_by(result=risk_level)
+        # Filter by risk score range if provided
+        if risk_score_min is not None:
+            query = query.filter(PCODCheck.risk_score >= risk_score_min)
         
-        if result:
-            query = query.filter_by(result=result)
+        if risk_score_max is not None:
+            query = query.filter(PCODCheck.risk_score <= risk_score_max)
+        
+        # Filter by exact result/status if provided
+        if result_filter:
+            query = query.filter(PCODCheck.result.like(f"%{result_filter}%"))
         
         total_count = query.count()
         
@@ -933,6 +985,11 @@ def get_all_checks():
             "total": total_count,
             "limit": limit,
             "offset": offset,
+            "filters": {
+                "risk_score_min": risk_score_min,
+                "risk_score_max": risk_score_max,
+                "result": result_filter
+            },
             "data": data
         }), 200
         
